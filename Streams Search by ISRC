@@ -1,0 +1,13 @@
+SELECT song_name, date, audience_data, platform_code, release_date,a.song_uuid, identifier FROM `firebird-data-project.soundcharts.song_create_audience` a
+
+JOIN `firebird-data-project.soundcharts.song_isrc` id
+ON  a.song_uuid = id.song_uuid
+JOIN `firebird-data-project.soundcharts.song` n
+ON  a.song_uuid = n.song_uuid
+
+
+WHERE isrc = 'GBCPZ2524512' 
+and platform_code = 'spotify'
+ORDER BY date DESC
+
+LIMIT 1000
