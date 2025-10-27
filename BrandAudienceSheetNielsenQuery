@@ -1,0 +1,107 @@
+WITH user_weights AS
+  (SELECT DISTINCT user_id,
+                   weight,
+                   projected_weight
+   FROM
+     (SELECT user_id ,
+             LAST_VALUE(projected_weight) OVER(PARTITION BY user_id
+                                               ORDER BY period_from ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS projected_weight ,
+             LAST_VALUE(weight) OVER(PARTITION BY user_id
+                                     ORDER BY period_from ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS weight
+      FROM `firebird-data-project.nielseniq.weights`)),
+     target_users AS
+  (SELECT DISTINCT w.user_id,
+                   w.weight,
+                   w.projected_weight
+   FROM user_weights w
+   INNER JOIN
+     (SELECT DISTINCT items.user_id
+      FROM `firebird-data-project.nielseniq.items_tickets_curated` tickets
+      RIGHT JOIN `firebird-data-project.nielseniq.items_extended` items ON tickets.order_id = items.order_id
+      AND tickets.item_id = items.item_id
+      WHERE (lower(event_name) like '%sabrina carpenter%')
+        AND tickets.MERCHANT_NAME IN ('AXS',
+                                      'Front Gate Tickets',
+                                      'Live Nation',
+                                      'Ticketmaster',
+                                      'SeatGeek',
+                                      'See Tickets',
+                                      'StubHub',
+                                      'TickPick',
+                                      'TicketWeb',
+                                      'TodayTix',
+                                      'Vivid Seats')
+        AND items.order_date BETWEEN '2023-01-01' AND '2024-12-31'
+        AND tickets.event_date BETWEEN '2023-01-01' AND '2024-12-31') b ON w.user_id = b.user_id),
+     target_merchant_agg AS
+  (SELECT merchant_name,
+          SUM(user_count) AS unique_users,
+          SUM(order_total*projected_weight) AS weighted_dollars,
+          SUM(projected_weight) AS weighted_counts
+   FROM
+     (SELECT bu.user_id ,
+             items.merchant_name ,
+             COUNT(DISTINCT items.user_id) AS user_count ,
+             MAX(projected_weight) AS projected_weight ,
+             sum(item_quantity) AS item_quantity ,
+             sum(item_price) AS item_price ,
+             sum(CASE
+                     WHEN item_price IS NOT NULL THEN item_quantity * item_price
+                     ELSE order_total
+                 END) AS order_total
+      FROM `firebird-data-project.nielseniq.items_extended` items
+      JOIN target_users bu ON items.user_id = bu.user_id
+      AND items.order_date BETWEEN '2023-01-01' AND '2024-12-31'
+      GROUP BY 1,
+               2) user_merchant_weights
+   GROUP BY merchant_name),
+     all_users AS
+  (SELECT DISTINCT w.user_id,
+                   w.projected_weight
+   FROM user_weights w),
+     all_merchant_agg AS
+  (SELECT merchant_name,
+          SUM(user_count) AS unique_users,
+          SUM(order_total*projected_weight) AS weighted_dollars,
+          SUM(projected_weight) AS weighted_counts
+   FROM
+     (SELECT au.user_id ,
+             items.merchant_name ,
+             COUNT(DISTINCT items.user_id) AS user_count ,
+             MAX(projected_weight) AS projected_weight ,
+             sum(item_quantity) AS item_quantity ,
+             sum(item_price) AS item_price ,
+             sum(CASE
+                     WHEN item_price IS NOT NULL THEN item_quantity * item_price
+                     ELSE order_total
+                 END) AS order_total
+      FROM `firebird-data-project.nielseniq.items_extended` items
+      JOIN all_users au ON items.user_id = au.user_id
+      AND items.order_date BETWEEN '2023-01-01' AND '2024-12-31'
+      GROUP BY 1,
+               2) user_merchant_weights
+   GROUP BY merchant_name),
+     FINAL AS
+  (SELECT b.merchant_name,
+          b.unique_users AS target_users,
+          b.weighted_dollars AS target_weighted_dollars,
+          b.weighted_counts AS target_weighted_counts,
+          a.unique_users AS all_users,
+          a.weighted_dollars AS all_weighted_dollars,
+          a.weighted_counts AS all_weighted_counts,
+          ((b.weighted_counts/261120.814919)/(a.weighted_counts/226892934.952963)) AS INDEX,
+          (b.weighted_dollars / CASE
+                                    WHEN a.weighted_dollars>0 THEN a.weighted_dollars
+                                    ELSE 0.01
+                                END) AS dollars_ratio,
+          (b.weighted_counts*1.0 / a.weighted_counts) AS counts_ratio,
+          RANK() OVER(PARTITION BY b.merchant_name
+                      ORDER BY (b.unique_users/261120.814919)/(a.unique_users/226892934.952963) DESC) AS merchant_rank_top,
+          RANK() OVER(PARTITION BY b.merchant_name
+                      ORDER BY (b.unique_users/261120.814919)/(a.unique_users/226892934.952963) ASC) AS merchant_rank_bottom
+   FROM target_merchant_agg b
+   JOIN all_merchant_agg a ON b.merchant_name = a.merchant_name)
+SELECT *
+FROM FINAL
+ORDER BY merchant_name,
+         merchant_rank_top ASC
