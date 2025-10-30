@@ -1,0 +1,153 @@
+WITH user_weights AS (
+  SELECT DISTINCT user_id, weight, projected_weight
+  FROM (
+    SELECT
+      user_id,
+      LAST_VALUE(projected_weight) OVER (
+        PARTITION BY user_id
+        ORDER BY period_from
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+      ) AS projected_weight,
+      LAST_VALUE(weight) OVER (
+        PARTITION BY user_id
+        ORDER BY period_from
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+      ) AS weight
+    FROM `firebird-data-project.nielseniq.weights`
+  )
+),
+target_users AS (
+  SELECT DISTINCT w.user_id, w.weight, w.projected_weight
+  FROM user_weights w
+  INNER JOIN (
+    SELECT DISTINCT items.user_id
+    FROM `firebird-data-project.nielseniq.items_tickets_parsed` tickets
+    RIGHT JOIN `firebird-data-project.nielseniq.items_extended` items
+      ON tickets.order_id = items.order_id
+     AND tickets.item_id = items.item_id
+    WHERE REGEXP_CONTAINS(event_name, r'(?i)\ball things go\b')
+      AND tickets.merchant_name IN (
+        'AXS','Front Gate Tickets','Live Nation','Ticketmaster',
+        'SeatGeek','See Tickets','StubHub','TickPick',
+        'TicketWeb','TodayTix','Vivid Seats'
+      )
+      AND DATE(tickets.event_date) BETWEEN DATE '2024-01-01' AND DATE '2024-12-31'
+      -- If event_date is already a DATE, use:
+      -- AND tickets.event_date BETWEEN DATE '2024-01-01' AND DATE '2024-12-31'
+  ) b ON w.user_id = b.user_id
+),
+target_user_item_weights AS (
+  SELECT
+    ie.user_id,
+    ie.merchant_name,
+    CASE
+      WHEN ie.merchant_name IN (
+        'AXS','Front Gate Tickets','Live Nation','Ticketmaster',
+        'SeatGeek','See Tickets','StubHub','TickPick',
+        'TicketWeb','TodayTix','Vivid Seats'
+      ) THEN tickets.event_name
+      WHEN ie.merchant_name IN ('AMC Theatres','Atom Tickets','Cinemark Holdings','Regal Cinemas')
+        THEN SPLIT(ie.description, '\n')[SAFE_OFFSET(0)]
+      ELSE ie.description
+    END AS description,
+    MAX(bu.projected_weight) AS user_projected_weight,
+    SUM(CASE
+          WHEN ie.item_price IS NOT NULL THEN ie.item_quantity * ie.item_price
+          ELSE ie.order_total
+        END) AS user_total_dollars,
+    COUNT(*) AS user_item_count
+  FROM `firebird-data-project.nielseniq.items_extended` ie
+  JOIN target_users bu ON ie.user_id = bu.user_id
+  LEFT JOIN `firebird-data-project.nielseniq.items_tickets_parsed` tickets
+    ON ie.order_id = tickets.order_id
+  GROUP BY 1,2,3
+),
+all_users AS (
+  SELECT DISTINCT w.user_id, w.projected_weight
+  FROM user_weights w
+),
+all_user_item_weights AS (
+  SELECT
+    ie.user_id,
+    CASE
+      WHEN ie.merchant_name IN (
+        'AXS','Front Gate Tickets','Live Nation','Ticketmaster',
+        'SeatGeek','See Tickets','StubHub','TickPick',
+        'TicketWeb','TodayTix','Vivid Seats'
+      ) THEN tickets.event_name
+      WHEN ie.merchant_name IN ('AMC Theatres','Atom Tickets','Cinemark Holdings','Regal Cinemas')
+        THEN SPLIT(ie.description, '\n')[SAFE_OFFSET(0)]
+      ELSE ie.description
+    END AS description,
+    ie.merchant_name,
+    MAX(au.projected_weight) AS user_projected_weight,
+    SUM(CASE
+          WHEN ie.item_price IS NOT NULL THEN ie.item_quantity * ie.item_price
+          ELSE ie.order_total
+        END) AS user_total_dollars,
+    COUNT(*) AS user_item_count
+  FROM `firebird-data-project.nielseniq.items_extended` ie
+  JOIN all_users au ON ie.user_id = au.user_id
+  LEFT JOIN `firebird-data-project.nielseniq.items_tickets_parsed` tickets
+    ON ie.order_id = tickets.order_id
+  GROUP BY 1,2,3
+),
+target_item_agg AS (
+  SELECT
+    merchant_name,
+    description,
+    SUM(user_projected_weight) AS weighted_unique_users,
+    SUM(user_total_dollars * user_projected_weight) AS weighted_dollars,
+    SUM(user_item_count * user_projected_weight) AS weighted_counts
+  FROM target_user_item_weights
+  GROUP BY merchant_name, description
+  HAVING COUNT(DISTINCT user_id) >= 16.67
+),
+all_item_agg AS (
+  SELECT
+    merchant_name,
+    description,
+    SUM(user_projected_weight) AS weighted_unique_users,
+    SUM(user_total_dollars * user_projected_weight) AS weighted_dollars,
+    SUM(user_item_count * user_projected_weight) AS weighted_counts
+  FROM all_user_item_weights
+  GROUP BY merchant_name, description
+),
+final AS (
+  SELECT
+    b.description,
+    b.merchant_name,
+    b.weighted_unique_users AS target_weighted_users,
+    b.weighted_dollars AS target_weighted_dollars,
+    b.weighted_counts AS target_weighted_counts,
+    a.weighted_unique_users AS all_weighted_users,
+    a.weighted_dollars AS all_weighted_dollars,
+    a.weighted_counts AS all_weighted_counts,
+    ((b.weighted_unique_users/153020.641331)/(a.weighted_unique_users/226892934.952962)) AS Index,
+    (b.weighted_dollars / CASE WHEN a.weighted_dollars > 0 THEN a.weighted_dollars ELSE 0.01 END) AS dollars_ratio,
+    (b.weighted_counts * 1.0 / a.weighted_counts) AS counts_ratio,
+    RANK() OVER (
+      PARTITION BY a.merchant_name
+      ORDER BY (b.weighted_unique_users/153020.641331)/(a.weighted_unique_users/226892934.952962) DESC
+    ) AS merchant_rank_top,
+    RANK() OVER (
+      PARTITION BY a.merchant_name
+      ORDER BY (b.weighted_unique_users/153020.641331)/(a.weighted_unique_users/226892934.952962) ASC
+    ) AS merchant_rank_bottom
+  FROM target_item_agg b
+  JOIN all_item_agg a
+    ON b.merchant_name = a.merchant_name
+   AND b.description = a.description
+)
+SELECT *
+FROM final
+WHERE merchant_name IN (
+  'AXS','Front Gate Tickets','Live Nation','Ticketmaster',
+  'SeatGeek','See Tickets','StubHub','TickPick',
+  'TicketWeb','TodayTix','Vivid Seats'
+)
+AND NOT REGEXP_CONTAINS(description, r'(?i)\ball things go\b')
+AND (merchant_rank_top <= 100 OR merchant_rank_bottom <= 100)
+ORDER BY Index DESC;
+
+
