@@ -1,0 +1,41 @@
+WITH base AS (
+  SELECT
+    DATE(date) AS stream_date,
+    isrc,
+    reporting_organization_id,
+    stream_source,
+    number_of_streams,
+    CASE
+      WHEN trend_report_type = 0 THEN 'Spotify Music'
+      WHEN trend_report_type = 3 THEN 'SPOTIFY_SUB_30_SECONDS_STREAMS'
+      WHEN trend_report_type = 10 THEN 'iTunes/Apple Music'
+      WHEN trend_report_type = 20 THEN 'Amazon'
+      WHEN trend_report_type = 30 THEN 'Saavn'
+      WHEN trend_report_type = 40 THEN 'Deezer'
+      WHEN trend_report_type = 50 THEN 'Google'
+      WHEN trend_report_type = 70 THEN 'Deezer'
+      WHEN trend_report_type = 90 THEN 'Pandora'
+      WHEN trend_report_type = 100 THEN 'YouTube'
+      WHEN trend_report_type = 110 THEN 'Soundcloud'
+      WHEN trend_report_type = 120 THEN 'Line'
+      WHEN trend_report_type = 130 THEN 'TIKTOK_STREAMS'
+      ELSE 'UNKNOWN_STREAM'
+    END AS stream_category
+  FROM `firebird-data-project.fuga.user_streams_7w_enhanced`
+  WHERE isrc = 'QZHN52355765'
+    AND DATE(date) BETWEEN DATE '2025-10-10' AND DATE '2025-10-16'
+    AND trend_report_type != 130  -- exclude TikTok
+)
+SELECT
+  reporting_organization_id,
+  stream_category,
+  stream_source,
+  SUM(number_of_streams) AS total_streams,
+  ROUND(
+    100 * SAFE_DIVIDE(SUM(number_of_streams),
+                      SUM(SUM(number_of_streams)) OVER ()),
+    2
+  ) AS pct_of_streams
+FROM base
+GROUP BY reporting_organization_id, stream_category, stream_source
+ORDER BY total_streams DESC;
